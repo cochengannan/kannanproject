@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Racing Game - 2D Top-Down</title>
+<style>
+  :root {
+    --track-color: #444;
+    --track-edge-color: #eee;
+    --grass-color: #2c6e49;
+    --player-color: #ff4d4d;
+    --ai-color: #4d79ff;
+    --bg-gradient-start: #1b2735;
+    --bg-gradient-end: #090a0f;
+    --shadow-color: rgba(0, 0, 0, 0.7);
+  }
+  body, html {
+    margin: 0; padding: 0; height: 100%;
+    background: linear-gradient(135deg, var(--bg-gradient-start), var(--bg-gradient-end));
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    user-select: none;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    color: #eee;
+  }
+  #game-container {
+    position: relative;
+    width: 800px;
+    height: 600px;
+    box-shadow: 0 0 15px var(--shadow-color);
+    border-radius: 12px;
+    background: var(--grass-color);
+  }
+  canvas {
+    display: block;
+    background: var(--grass-color);
+    border-radius: 12px;
+  }
+  #info {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    background: rgba(0,0,0,0.5);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: bold;
+    user-select: none;
+  }
+  #message {
+    position: absolute;
+    bottom: 20px;
+    width: 100%;
+    text-align: center;
+    font-size: 20px;
+    font-weight: bold;
+    color: #f0a500;
+    text-shadow: 1px 1px 3px #000;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div id="game-container">
+    <canvas id="game" width="800" height="600"></canvas>
+    <div id="info">Lap: 0 / 3 &nbsp;&nbsp; Time: 0.000s</div>
+    <div id="message"></div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const info = document.getElementById('info');
+  const messageDiv = document.getElementById('message');
+
+  const WIDTH = canvas.width;
+  const HEIGHT = canvas.height;
+
+  // Track parameters
+  // Oval track: outer ellipse and inner ellipse - player drives between these two lines
+  const TRACK = {
+    centerX: WIDTH/2,
+    centerY: HEIGHT/2,
+    outerRadiusX: 350,
+    outerRadiusY: 230,
+    innerRadiusX: 220,
+    innerRadiusY: 130,
+    finishLineAngleStart: -0.1,
+    finishLineAngleEnd: 0.1
+  };
+
+  // Game state
+  let lapsToComplete = 3;
+
+  // Utility fns
+  function degToRad(deg) { return deg * Math.PI / 180; }
+  function radToDeg(rad) { return rad * 180 / Math.PI; }
+  function lerp(a,b,t) { return a+(b-a)*t; }
+  function clamp(val, min, max) { return Math.min(max, Math.max(min, val)); }
+
+  // Point on ellipse with center cx,cy and radiusX,radiusY at angle (radians)
+  function pointOnEllipse(cx, cy, radiusX, radiusY, angle) {
+    return {
+      x: cx + radiusX * Math.cos(angle),
+      y: cy + radiusY * Math.sin(angle)
+    };
+  }
+
+  // Distance between two points
+  function dist(a,b) {
+    return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2);
+  }
+
+  // Car class
+  class Car {
+    constructor(x, y, angle = 0, color = 'red') {
+      this.x = x;
+      this.y = y;
+      this.angle = angle; // radians, 0 toward right
+      this.speed = 0;
+      this.maxSpeed = 3.5;
+      this.acceleration = 0.07;
+      this.friction = 0.04;
+      this.turnSpeed = degToRad(3);
+      this.width = 20;
+      this.height = 40;
+      this.color = color;
+      this.lap = 0;
+      this.finished = false;
+      this.timeStarted = null;
+      this.timeFinished = null;
+      this.checkpointPassed = false;
+    }
+
+    resetPosition(x,y,angle) {
+      this.x = x;
+      this.y = y;
+      this.angle = angle;
+      this.speed = 0;
+      this.lap = 0;
+      this.finished = false;
+      this.timeStarted = null;
+      this.timeFinished = null;
+      this.checkpointPassed = false;
+    }
+
+    update(keys) {
+      if(this.finished) return;
+
+      // Controls (for player): keys = {left, right, up, down}
+      if (keys.left) this.angle -= this.turnSpeed * (this.speed > 0.1 ? 1 : 0);
+      if (keys.right) this.angle += this.turnSpeed * (this.speed > 0.1 ? 1 : 0);
+      if (keys.up) this.speed += this.acceleration;
+      else if (keys.down) this.speed -= this.acceleration;
+      else this.speed -= this.friction;
+
+      this.speed = clamp(this.speed, 0, this.maxSpeed);
+
+      // Move car forward
+      this.x += Math.cos(this.angle) * this.speed;
+      this.y += Math.sin(this.angle) * this.speed;
+    }
+
+    // Move with given speed and angle (used for AI)
+    move(speed, angle) {
+      if(this.finished) return;
+      this.speed = clamp(speed, 0, this.maxSpeed);
+      this.angle = angle;
+      this.x += Math.cos(this.angle) * this.speed;
+      this.y += Math.sin(this.angle) * this.speed;
+    }
+
+    draw(ctx) {
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+      // shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.2)';
+      ctx.fillRect(-this.width/2+3, -this.height/2+4, this.width, this.height);
+      // car body
+      ctx.fillStyle = this.color;
+      ctx.strokeStyle = '#222';
+      ctx.lineWidth = 2;
+      ctx.fillRect(-this.width/2, -this.height/2, this.width, this.height);
+      ctx.strokeRect(-this.width/2, -this.height/2, this.width, this.height);
+      // windows - front
+      ctx.fillStyle = '#a0c8ff';
+      ctx.beginPath();
+      ctx.moveTo(-this.width/4, -this.height/2);
+      ctx.lineTo(this.width/4, -this.height/2);
+      ctx.lineTo(this.width/4, -this.height/4);
+      ctx.lineTo(-this.width/4, -this.height/4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Check if car crosses finish line
+    checkFinishLine() {
+      // Approximate finish line position on ellipse between inner and outer using finishLineAngle
+      let angle = Math.atan2(this.y - TRACK.centerY, this.x - TRACK.centerX);
+      // Align angle between -PI to PI to 0-centered
+      if (angle > Math.PI) angle -= 2 * Math.PI;
+      if (angle < -Math.PI) angle += 2 * Math.PI;
+
+      if (angle > TRACK.finishLineAngleStart && angle < TRACK.finishLineAngleEnd) {
+        // Check if car is between track inner and outer edges at that angle (crossing finish line)
+        let innerPoint = pointOnEllipse(TRACK.centerX, TRACK.centerY, TRACK.innerRadiusX, TRACK.innerRadiusY, angle);
+        let outerPoint = pointOnEllipse(TRACK.centerX, TRACK.centerY, TRACK.outerRadiusX, TRACK.outerRadiusY, angle);
+        let dInner = dist({x:this.x,y:this.y}, innerPoint);
+        let dOuter = dist({x:this.x,y:this.y}, outerPoint);
+        let maxDist = dist(innerPoint, outerPoint);
+        let projOnLine = ((this.x - innerPoint.x) * (outerPoint.x - innerPoint.x) + (this.y - innerPoint.y) * (outerPoint.y - innerPoint.y)) / (maxDist * maxDist);
+        // projOnLine between 0 and 1 means car is between inner and outer line at finish line sector
+        if (projOnLine >= 0 && projOnLine <= 1) {
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+
+  // AI Car extends Car and adds simple path following logic
+  class AICar extends Car {
+    constructor(x, y, angle, color) {
+      super(x, y, angle, color);
+      this.targetProgress = 0; // from 0 to 1: pos on track ellipse [0=finish line angleStart]
+      this.speed = 2.8; // fixed AI speed for now
+      this.turnSpeed = degToRad(2);
+      this.lap = 0;
+      this.finished = false;
+      this.checkpointPassed = false;
+    }
+
+    updateAI() {
+      if(this.finished) return;
+
+      // AI tries to follow a path along the center line of the track ellipse.
+      let targetAngle = lerp(TRACK.finishLineAngleStart, (2*Math.PI) + TRACK.finishLineAngleStart, this.targetProgress);
+      if (targetAngle > Math.PI) targetAngle -= 2*Math.PI;
+
+      // Target position on center line between inner and outer radii (average radius)
+      let centerRadiusX = (TRACK.innerRadiusX + TRACK.outerRadiusX) / 2;
+      let centerRadiusY = (TRACK.innerRadiusY + TRACK.outerRadiusY) / 2;
+
+      let targetPoint = pointOnEllipse(TRACK.centerX, TRACK.centerY, centerRadiusX, centerRadiusY, targetAngle);
+
+      // Angle from car position to target point
+      let desiredAngle = Math.atan2(targetPoint.y - this.y, targetPoint.x - this.x);
+
+      // Angle difference normalize (-PI, PI)
+      let angleDiff = desiredAngle - this.angle;
+      if (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+      if (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+
+      // Adjust angle gradually
+      if (angleDiff > 0.05) {
+        this.angle += this.turnSpeed;
+      } else if (angleDiff < -0.05) {
+        this.angle -= this.turnSpeed;
+      } else {
+        this.angle = desiredAngle;
+      }
+
+      this.speed = this.maxSpeed * 0.9;
+
+      // Move forward
+      this.x += Math.cos(this.angle) * this.speed;
+      this.y += Math.sin(this.angle) * this.speed;
+
+      // Check if passed the point close enough to advance targetProgress
+      if (dist({x:this.x,y:this.y}, targetPoint) < 15) {
+        this.targetProgress += 0.005;
+        if (this.targetProgress > 1) {
+          this.targetProgress = 0;
+          this.lap++;
+          if (this.lap >= lapsToComplete) {
+            this.finished = true;
+          }
+        }
+      }
+    }
+  }
+
+  // Game variables
+  let player, aiCars;
+  let keys = {left:false, right:false, up:false, down:false};
+  let gameStarted = false;
+  let startTime = 0;
+  let elapsedTime = 0;
+  let lapsCompleted = 0;
+  let raceFinished = false;
+  let finishTime = 0;
+
+  // Initialize the game
+  function init() {
+    // Player start position: near finish line on center track line
+    let startAngle = TRACK.finishLineAngleStart + 0.1;
+    let radX = (TRACK.innerRadiusX + TRACK.outerRadiusX)/2;
+    let radY = (TRACK.innerRadiusY + TRACK.outerRadiusY)/2;
+    let startPos = pointOnEllipse(TRACK.centerX, TRACK.centerY, radX, radY, startAngle);
+
+    player = new Car(startPos.x, startPos.y, startAngle, getComputedStyle(document.documentElement).getPropertyValue('--player-color').trim());
+    player.timeStarted = null;
+    lapsCompleted = 0;
+
+    // AI cars start 3 off center with offsets around the start angle on the center path
+    aiCars = [];
+    const aiColors = [
+      getComputedStyle(document.documentElement).getPropertyValue('--ai-color').trim(),
+      '#ffa500', // orange
+      '#00cc99', // teal
+    ];
+    for(let i=0; i<3; i++) {
+      let offsetProgress = 0.02 * (i+1);
+      let aiAngle = lerp(TRACK.finishLineAngleStart, TRACK.finishLineAngleStart + 2*Math.PI, offsetProgress);
+      if (aiAngle > Math.PI) aiAngle -= 2*Math.PI;
+      let aiPos = pointOnEllipse(TRACK.centerX, TRACK.centerY, radX, radY, aiAngle);
+      let aiCar = new AICar(aiPos.x, aiPos.y, aiAngle, aiColors[i]);
+      aiCar.targetProgress = offsetProgress;
+      aiCars.push(aiCar);
+    }
+
+    raceFinished = false;
+    finishTime = 0;
+    gameStarted = false;
+    elapsedTime = 0;
+    messageDiv.textContent = 'Use arrow keys to start racing!';
+  }
+
+  // Draw track: grass, track, inner edge, outer edge, finish line
+  function drawTrack() {
+    // Grass: fill background (already set by canvas background)
+    // Outer track edge
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--track-color').trim();
+    ctx.beginPath();
+    ctx.ellipse(TRACK.centerX, TRACK.centerY, TRACK.outerRadiusX, TRACK.outerRadiusY, 0, 0, 2*Math.PI);
+    ctx.fill();
+
+    // Inner track hole
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--grass-color').trim();
+    ctx.beginPath();
+    ctx.ellipse(TRACK.centerX, TRACK.centerY, TRACK.innerRadiusX, TRACK.innerRadiusY, 0, 0, 2*Math.PI);
+    ctx.fill();
+
+    // Track edges lines
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--track-edge-color').trim();
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.ellipse(TRACK.centerX, TRACK.centerY, TRACK.outerRadiusX, TRACK.outerRadiusY, 0, 0, 2*Math.PI);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.ellipse(TRACK.centerX, TRACK.centerY, TRACK.innerRadiusX, TRACK.innerRadiusY, 0, 0, 2*Math.PI);
+    ctx.stroke();
+
+    // Finish line - a white vertical line segment connecting inner and outer edge
+    let startPoint = pointOnEllipse(TRACK.centerX, TRACK.centerY, TRACK.innerRadiusX, TRACK.innerRadiusY, 0);
+    let endPoint = pointOnEllipse(TRACK.centerX, TRACK.centerY, TRACK.outerRadiusX, TRACK.outerRadiusY, 0);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(startPoint.x, startPoint.y);
+    ctx.lineTo(endPoint.x, endPoint.y);
+    ctx.stroke();
+  }
+
+  // Draw player and AI cars
+  function drawCars() {
+    player.draw(ctx);
+    aiCars.forEach(car => car.draw(ctx));
+  }
+
+  // Check player's lap progress
+  function updateLap() {
+    if (player.finished) return;
+
+    if(player.checkFinishLine()) {
+      if (!player.checkpointPassed) {
+        player.lap++;
+        player.checkpointPassed = true;
+        // Start timing when first lap starts
+        if(player.lap === 1) {
+          startTime = performance.now();
+          player.timeStarted = startTime;
+          gameStarted = true;
+          messageDiv.textContent = 'Race Started! Good luck!';
+        }
+        if(player.lap >= lapsToComplete) {
+          player.finished = true;
+          raceFinished = true;
+          finishTime = performance.now();
+          elapsedTime = finishTime - startTime;
+          messageDiv.textContent = 'You finished the race! Time: ' + (elapsedTime/1000).toFixed(3) + 's';
+        }
+      }
+    } else {
+      player.checkpointPassed = false;
+    }
+    lapsCompleted = player.lap;
+  }
+
+  // Check AI laps
+  function updateAILaps() {
+    aiCars.forEach(aiCar => {
+      if (aiCar.finished) return;
+      if (aiCar.targetProgress === 0) {
+        aiCar.lap++;
+        if (aiCar.lap >= lapsToComplete) {
+          aiCar.finished = true;
+          if (!raceFinished) {
+            messageDiv.textContent = 'AI finished first! Better luck next time!';
+            raceFinished = true;
+          }
+        }
+      }
+    });
+  }
+
+  // Show info HUD
+  function updateInfo() {
+    let timeDisplay = '0.000';
+    if (gameStarted && !raceFinished) {
+      elapsedTime = performance.now() - startTime;
+      timeDisplay = (elapsedTime / 1000).toFixed(3);
+    } else if (raceFinished) {
+      timeDisplay = (elapsedTime/1000).toFixed(3);
+    }
+    info.innerHTML = `Lap: ${lapsCompleted} / ${lapsToComplete} &nbsp;&nbsp; Time: ${timeDisplay}s`;
+  }
+
+  // Handle player input
+  window.addEventListener('keydown', e => {
+    if (e.repeat) return;
+    if(e.key === 'ArrowLeft' || e.key === 'a') keys.left = true;
+    else if(e.key === 'ArrowRight' || e.key === 'd') keys.right = true;
+    else if(e.key === 'ArrowUp' || e.key === 'w') keys.up = true;
+    else if(e.key === 'ArrowDown' || e.key === 's') keys.down = true;
+    else if(e.key === 'r' && raceFinished) init();
+  });
+  window.addEventListener('keyup', e => {
+    if(e.key === 'ArrowLeft' || e.key === 'a') keys.left = false;
+    else if(e.key === 'ArrowRight' || e.key === 'd') keys.right = false;
+    else if(e.key === 'ArrowUp' || e.key === 'w') keys.up = false;
+    else if(e.key === 'ArrowDown' || e.key === 's') keys.down = false;
+  });
+
+  // Game loop
+  function loop() {
+    ctx.clearRect(0,0,WIDTH,HEIGHT);
+    drawTrack();
+
+    player.update(keys);
+    player.speed = Math.max(player.speed, 0); // no reverse for player
+    player.draw(ctx);
+
+    aiCars.forEach(ai => {
+      ai.updateAI();
+      ai.draw(ctx);
+    });
+
+    updateLap();
+    updateInfo();
+
+    if(!raceFinished) {
+      requestAnimationFrame(loop);
+    } else {
+      updateInfo();
+    }
+  }
+
+  // Start game
+  init();
+  loop();
+
+  // Instructions message
+  messageDiv.innerHTML = "Use Arrow Keys to Accelerate and Steer.<br>Finish 3 Laps to Win. Press 'R' to Restart.";
+
+})();
+</script>
+</body>
+</html>
+
